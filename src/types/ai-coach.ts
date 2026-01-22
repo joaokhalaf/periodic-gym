@@ -42,6 +42,21 @@ export interface VideoQualityPreset {
   width: number
   height: number
   bitrate: number
+  frameRate?: number
+  label?: string
+}
+
+export const VIDEO_QUALITY_PRESETS: Record<VideoQuality, VideoQualityPreset> = {
+  low: { width: 640, height: 480, bitrate: 1000000, frameRate: 24, label: 'Baixa (480p)' },
+  medium: { width: 1280, height: 720, bitrate: 2500000, frameRate: 30, label: 'Média (720p)' },
+  high: { width: 1920, height: 1080, bitrate: 5000000, frameRate: 30, label: 'Alta (1080p)' }
+}
+
+export interface FrameExtractionOptions {
+  maxWidth: number
+  maxHeight: number
+  quality: number
+  frameCount: number
 }
 
 export class RecordingError extends Error {
