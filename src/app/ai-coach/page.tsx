@@ -28,7 +28,7 @@ import { usePoseAnalysis } from "@/hooks/usePoseAnalysis"
 import { StatusCard } from "@/components/ai-coach/status-card"
 import { FeedbackList } from "@/components/ai-coach/feedback-list"
 import { CameraView } from "@/components/ai-coach/camera-view"
-import { downloadVideo, generateSessionId, extractFramesFromVideo } from "@/lib/video-utils"
+import { downloadVideo, generateSessionId, extractFramesWithSizeLimit, estimateBlobSizeMB } from "@/lib/video-utils"
 import { saveSession } from "@/lib/db"
 import { toast } from "sonner"
 
@@ -180,13 +180,23 @@ export default function CoachPage() {
     if (repCount > 0) formData.append('detectedReps', repCount.toString())
     if (avgQuality > 0) formData.append('avgQuality', avgQuality.toString())
 
-    // Extrair frames do vídeo para reduzir tamanho (evita erro 413)
+    // Log video size for debugging
+    const videoSizeMB = estimateBlobSizeMB(blob)
+    console.log(`[AI Coach] Video size: ${videoSizeMB.toFixed(2)} MB`)
+
+    // Extract frames with automatic size optimization (target 2MB for API limits)
     try {
-      const frames = await extractFramesFromVideo(blob, 6)
+      const frames = await extractFramesWithSizeLimit(blob, 2)
+      console.log(`[AI Coach] Extracted ${frames.length} frames`)
       formData.append('frames', JSON.stringify(frames))
     } catch (err) {
       console.warn('Falha ao extrair frames, enviando vídeo completo:', err)
-      formData.append('video', blob)
+      // Only send video if it's under 10MB
+      if (videoSizeMB < 10) {
+        formData.append('video', blob)
+      } else {
+        throw new Error('Vídeo muito grande. Tente uma gravação mais curta.')
+      }
     }
 
     // Create abort controller for cancellation

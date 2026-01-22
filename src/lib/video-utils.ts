@@ -1,4 +1,35 @@
-import type { AnalysisResult } from '@/types/ai-coach'
+import type { AnalysisResult, FrameExtractionOptions, VideoQuality } from '@/types/ai-coach'
+
+/**
+ * Frame extraction quality presets based on video duration and target size
+ */
+export const FRAME_EXTRACTION_PRESETS: Record<VideoQuality, FrameExtractionOptions> = {
+  low: { maxWidth: 480, maxHeight: 360, quality: 0.5, frameCount: 4 },
+  medium: { maxWidth: 640, maxHeight: 480, quality: 0.7, frameCount: 6 },
+  high: { maxWidth: 854, maxHeight: 480, quality: 0.85, frameCount: 8 }
+}
+
+/**
+ * Calculate optimal frame extraction settings based on video duration
+ */
+export function getOptimalFrameSettings(durationSeconds: number): FrameExtractionOptions {
+  if (durationSeconds <= 5) {
+    return { ...FRAME_EXTRACTION_PRESETS.low, frameCount: 3 }
+  } else if (durationSeconds <= 15) {
+    return FRAME_EXTRACTION_PRESETS.medium
+  } else if (durationSeconds <= 30) {
+    return { ...FRAME_EXTRACTION_PRESETS.medium, frameCount: 8 }
+  } else {
+    return { ...FRAME_EXTRACTION_PRESETS.high, frameCount: 10 }
+  }
+}
+
+/**
+ * Estimate blob size in MB
+ */
+export function estimateBlobSizeMB(blob: Blob): number {
+  return blob.size / (1024 * 1024)
+}
 
 export class UploadQueue {
   private queue: Array<{ blob: Blob; metadata: any }> = []
@@ -131,12 +162,12 @@ export function generateSessionId(): string {
 /**
  * Extrai frames de um vídeo para análise
  * @param videoBlob - Blob do vídeo
- * @param frameCount - Número de frames a extrair (padrão: 5)
+ * @param frameCountOrOptions - Número de frames ou objeto de opções
  * @returns Array de strings base64 das imagens
  */
 export async function extractFramesFromVideo(
   videoBlob: Blob,
-  frameCount: number = 5
+  frameCountOrOptions: number | Partial<FrameExtractionOptions> = 5
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video')
@@ -147,6 +178,11 @@ export async function extractFramesFromVideo(
       reject(new Error('Canvas context não disponível'))
       return
     }
+
+    // Parse options
+    const options: FrameExtractionOptions = typeof frameCountOrOptions === 'number'
+      ? { ...FRAME_EXTRACTION_PRESETS.medium, frameCount: frameCountOrOptions }
+      : { ...FRAME_EXTRACTION_PRESETS.medium, ...frameCountOrOptions }
 
     const url = URL.createObjectURL(videoBlob)
     video.src = url
@@ -170,9 +206,25 @@ export async function extractFramesFromVideo(
         return
       }
 
-      canvas.width = Math.min(video.videoWidth || 640, 640)
-      canvas.height = Math.min(video.videoHeight || 480, 480)
+      // Auto-adjust frame count based on duration if using default
+      const effectiveOptions = typeof frameCountOrOptions === 'number'
+        ? options
+        : { ...options, ...getOptimalFrameSettings(duration) }
 
+      // Calculate canvas dimensions maintaining aspect ratio
+      const videoAspect = video.videoWidth / video.videoHeight
+      let targetWidth = Math.min(video.videoWidth, effectiveOptions.maxWidth)
+      let targetHeight = Math.round(targetWidth / videoAspect)
+
+      if (targetHeight > effectiveOptions.maxHeight) {
+        targetHeight = effectiveOptions.maxHeight
+        targetWidth = Math.round(targetHeight * videoAspect)
+      }
+
+      canvas.width = targetWidth
+      canvas.height = targetHeight
+
+      const frameCount = effectiveOptions.frameCount
       const interval = duration / (frameCount + 1)
       let currentFrame = 0
 
@@ -195,19 +247,7 @@ export async function extractFramesFromVideo(
         video.currentTime = targetTime
       }
 
-      video.onseeked = () => {
-        try {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-          const frameData = canvas.toDataURL('image/jpeg', 0.7)
-          frames.push(frameData.split(',')[1])
-        } catch (e) {
-          console.warn('Erro ao capturar frame:', e)
-        }
-        currentFrame++
-        captureFrame()
-      }
-
-      // Timeout de segurança
+      // Timeout de segurança (scaled by frame count)
       const timeout = setTimeout(() => {
         cleanup()
         if (frames.length > 0) {
@@ -215,12 +255,12 @@ export async function extractFramesFromVideo(
         } else {
           reject(new Error('Timeout ao extrair frames'))
         }
-      }, 10000)
+      }, 10000 + (frameCount * 1000))
 
       video.onseeked = () => {
         try {
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-          const frameData = canvas.toDataURL('image/jpeg', 0.7)
+          const frameData = canvas.toDataURL('image/jpeg', effectiveOptions.quality)
           frames.push(frameData.split(',')[1])
         } catch (e) {
           console.warn('Erro ao capturar frame:', e)
@@ -246,5 +286,42 @@ export async function extractFramesFromVideo(
 
     // Forçar carregamento
     video.load()
+  })
+}
+
+/**
+ * Extract frames with automatic quality adjustment based on target size
+ * @param videoBlob - Video blob
+ * @param targetSizeMB - Target total size in MB for all frames
+ * @returns Array of base64 frame strings
+ */
+export async function extractFramesWithSizeLimit(
+  videoBlob: Blob,
+  targetSizeMB: number = 2
+): Promise<string[]> {
+  // Start with high quality and reduce if needed
+  const qualities: VideoQuality[] = ['high', 'medium', 'low']
+
+  for (const quality of qualities) {
+    try {
+      const frames = await extractFramesFromVideo(videoBlob, FRAME_EXTRACTION_PRESETS[quality])
+
+      // Estimate total size (base64 is ~33% larger than binary)
+      const totalSizeEstimate = frames.reduce((sum, f) => sum + f.length, 0) * 0.75 / (1024 * 1024)
+
+      if (totalSizeEstimate <= targetSizeMB) {
+        return frames
+      }
+    } catch (e) {
+      console.warn(`Failed to extract frames at ${quality} quality:`, e)
+    }
+  }
+
+  // Fallback to lowest quality with fewer frames
+  return extractFramesFromVideo(videoBlob, {
+    maxWidth: 320,
+    maxHeight: 240,
+    quality: 0.4,
+    frameCount: 3
   })
 }
